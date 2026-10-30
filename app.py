@@ -1,27 +1,32 @@
 import os
+import sys
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import cv2
 from pathlib import Path
-import tempfile
-import requests
-from urllib.parse import urlparse
 import time
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session
 import uuid
-import json
+import secrets
 from werkzeug.utils import secure_filename
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
+from concurrent.futures import ThreadPoolExecutor
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 app = Flask(__name__)
-app.secret_key = 'deepshield-ultimate-secret-key-2025'
-app.config['UPLOAD_FOLDER'] = 'uploads'
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_FOLDER = BASE_DIR / "uploads"
+app.config['UPLOAD_FOLDER'] = str(UPLOAD_FOLDER)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Create upload directory if it doesn't exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm'}
@@ -41,6 +46,9 @@ class FastUltimateDeepFakeDetector:
 
     def load_all_models(self):
         """Load all models with timing"""
+        if self.model_loaded:
+            return True
+
         print("🚀 Loading FAST DeepFake Detection System...")
         start_time = time.time()
 
@@ -61,7 +69,7 @@ class FastUltimateDeepFakeDetector:
                 # Try alternative paths
                 alternative_paths = [
                     self.working_dir / 'models' / 'final_fixed_probability_lstm_model.h5',
-                    Path('models') / 'final_fixed_probability_lstm_model.h5',
+                    self.working_dir / 'models' / 'final_fixed_probability_lstm_model.h5',
                     Path('/content/drive/MyDrive/working2') / 'final_fixed_probability_lstm_model.h5'
                 ]
                 
@@ -97,7 +105,6 @@ class FastUltimateDeepFakeDetector:
                     # Try alternative paths for each model
                     alt_model_paths = [
                         self.working_dir / 'models' / path.name,
-                        Path('models') / path.name,
                         Path('/content/drive/MyDrive/working2') / path.name
                     ]
                     
@@ -184,7 +191,7 @@ class FastUltimateDeepFakeDetector:
             enhanced_frame = enhanced_frame.astype(np.float32) / 255.0
             return enhanced_frame
 
-        except Exception as e:
+        except Exception:
             if frame.dtype != np.float32:
                 return frame.astype(np.float32) / 255.0
             return frame
@@ -213,7 +220,7 @@ class FastUltimateDeepFakeDetector:
             cropped = frame[start_y:start_y+crop_size, start_x:start_x+crop_size]
             face_resized = cv2.resize(cropped, (224, 224), interpolation=cv2.INTER_LINEAR)
             return face_resized
-        except Exception as e:
+        except Exception:
             return np.zeros((224, 224, 3), dtype=np.uint8)
 
     def apply_edge_detection(self, image):
@@ -249,7 +256,7 @@ class FastUltimateDeepFakeDetector:
             rgb_edge = np.concatenate([frame_normalized, edge_norm], axis=-1)
             return rgb_edge
 
-        except Exception as e:
+        except Exception:
             return np.zeros((224, 224, 4), dtype=np.float32)
 
     def get_edge_probability_parallel(self, frame_data):
@@ -345,16 +352,24 @@ class FastUltimateDeepFakeDetector:
         frame_data = [(i, frames[i]) for i in range(num_frames)]
         
         # Process all three modalities in parallel
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            # Submit all tasks
-            clahe_futures = [executor.submit(self.get_clahe_probability_parallel, fd) for fd in frame_data]
-            edge_futures = [executor.submit(self.get_edge_probability_parallel, fd) for fd in frame_data]
-            fft_futures = [executor.submit(self.get_fft_probability_parallel, fd) for fd in frame_data]
-            
-            # Collect results
-            clahe_results = [f.result() for f in clahe_futures]
-            edge_results = [f.result() for f in edge_futures]
-            fft_results = [f.result() for f in fft_futures]
+        # Reuse the detector's workers instead of creating and destroying them
+        # for every video analysis.
+        clahe_futures = [
+            self.parallel_executor.submit(self.get_clahe_probability_parallel, fd)
+            for fd in frame_data
+        ]
+        edge_futures = [
+            self.parallel_executor.submit(self.get_edge_probability_parallel, fd)
+            for fd in frame_data
+        ]
+        fft_futures = [
+            self.parallel_executor.submit(self.get_fft_probability_parallel, fd)
+            for fd in frame_data
+        ]
+
+        clahe_results = [f.result() for f in clahe_futures]
+        edge_results = [f.result() for f in edge_futures]
+        fft_results = [f.result() for f in fft_futures]
         
         # Sort by frame index and combine
         clahe_results.sort(key=lambda x: x[0])
@@ -508,26 +523,14 @@ class FastUltimateDeepFakeDetector:
             print(f"❌ Prediction error: {e}")
             return {"error": f"Prediction failed: {str(e)}"}
 
-# FIXED: Initialize detector with correct path
-possible_model_paths = [
-    '/content/drive/MyDrive/working2',  # Google Colab path
-    'models',                           # Local models folder
-    Path(__file__).parent / 'models',   # Relative models folder
-    Path.cwd() / 'models'               # Current working directory models folder
-]
+MODEL_PATHS = (
+    BASE_DIR / "models",
+    Path("/content/drive/MyDrive/working2"),
+)
 
-detector = None
-for model_path in possible_model_paths:
-    test_path = Path(model_path)
-    print(f"🔍 Checking model path: {test_path}")
-    if test_path.exists():
-        detector = FastUltimateDeepFakeDetector(test_path)
-        print(f"✅ Using model path: {test_path}")
-        break
-else:
-    # Fallback to current directory
-    print("⚠️ No model directory found, using current directory")
-    detector = FastUltimateDeepFakeDetector(Path.cwd())
+detector_path = next((path for path in MODEL_PATHS if path.exists()), BASE_DIR)
+print(f"🔍 Using model search path: {detector_path}")
+detector = FastUltimateDeepFakeDetector(detector_path)
 
 def allowed_file(filename):
     return '.' in filename and \
@@ -564,24 +567,27 @@ def contact():
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
-        return jsonify({'error': 'No file part'})
+        return jsonify({'error': 'No file part'}), 400
     
     file = request.files['file']
     if file.filename == '':
-        return jsonify({'error': 'No selected file'})
-    
+        return jsonify({'error': 'No selected file'}), 400
+
     if file and allowed_file(file.filename):
         file_id = str(uuid.uuid4())
         filename = secure_filename(file.filename)
+        if not filename:
+            return jsonify({'error': 'Invalid file name'}), 400
+
         file_extension = filename.rsplit('.', 1)[1].lower()
         unique_filename = f"{file_id}.{file_extension}"
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+        file_path = UPLOAD_FOLDER / unique_filename
         file.save(file_path)
         
         session['current_file'] = {
             'id': file_id,
             'original_name': filename,
-            'path': file_path
+            'path': str(file_path)
         }
         
         return jsonify({
@@ -590,38 +596,39 @@ def upload_file():
             'filename': filename
         })
     
-    return jsonify({'error': 'Invalid file type'})
+    return jsonify({'error': 'Invalid file type'}), 400
 
 @app.route('/analyze', methods=['POST'])
 def analyze_video():
     if 'current_file' not in session:
-        return jsonify({'error': 'No file uploaded'})
+        return jsonify({'error': 'No file uploaded'}), 400
     
     file_info = session['current_file']
     file_path = file_info['path']
     
     if not os.path.exists(file_path):
-        return jsonify({'error': 'File not found'})
+        session.pop('current_file', None)
+        return jsonify({'error': 'File not found'}), 404
     
     if not detector.model_loaded:
         if not detector.load_all_models():
-            return jsonify({'error': 'Failed to load detection models'})
+            return jsonify({'error': 'Failed to load detection models'}), 503
     
     try:
         # Use CORRECTED prediction
         result = detector.predict_video_fast(file_path)
-        
-        # Clean up
+        return jsonify(result)
+    except Exception as e:
+        app.logger.exception("Video analysis failed")
+        return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+    finally:
         try:
             os.remove(file_path)
-        except:
+        except FileNotFoundError:
             pass
-        
+        except OSError:
+            app.logger.exception("Could not remove uploaded file: %s", file_path)
         session.pop('current_file', None)
-        return jsonify(result)
-        
-    except Exception as e:
-        return jsonify({'error': f'Analysis failed: {str(e)}'})
 
 @app.route('/status')
 def status():

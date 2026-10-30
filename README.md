@@ -1,5 +1,22 @@
 # 🧠 Ultimate DeepFake Detection System
 
+## ▶️ Run locally
+
+The application requires Python 3.10+ and the TensorFlow CPU runtime. Install the
+runtime dependencies and start the Flask server from the repository root:
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Open <http://127.0.0.1:5000>. Place the four trained `.h5` model files in the
+repository root or `models/` before running an analysis. The web interface and
+health endpoint remain available when model files are not present, but analysis
+requests will report that the detection models could not be loaded.
+
 ## 🎯 Overview
 A **state-of-the-art multi-modal deepfake detection system** that combines computer vision techniques with deep learning to achieve **robust video authenticity verification**.  
 The system employs a **sophisticated ensemble approach** analyzing multiple visual modalities and their temporal patterns to detect manipulated content with high accuracy.
